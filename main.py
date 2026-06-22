@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 MP Incident Manager — daemon de monitoreo de tickets Jira.
-Polls IXFS e IXF cada 5 minutos, notifica con popup macOS, responde automáticamente
-con saludo, verifica SLA y genera reportes.
+
+Cada ciclo de polling hace dos cosas:
+1. Detecta tickets NUEVOS asignados → popup + saludo automático + Claude terminal
+2. Detecta NUEVOS COMENTARIOS en tickets ya asignados → popup de alerta + Claude terminal
 """
 
 import logging
@@ -14,6 +16,7 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).parent
 LOG_FILE = BASE_DIR / "logs" / "incident_manager.log"
+LOG_FILE.parent.mkdir(exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,94 +32,165 @@ from src import config
 from src import jira_client, notifier, sla_checker, reporter, history
 
 
-def process_ticket(ticket: dict, project: str):
+def _get_latest_external_comment(ticket: dict) -> tuple[str | None, str | None, str | None]:
+    """
+    Returns (comment_id, author_display, created_ts) of the most recent comment
+    NOT written by the logged-in user, or (None, None, None) if none exists.
+    """
+    comments = ticket.get("fields", {}).get("comment", {})
+    if not comments:
+        return None, None, None
+    all_comments = comments.get("comments", [])
+    for c in reversed(all_comments):
+        author_email = c.get("author", {}).get("emailAddress", "")
+        if author_email.lower() != config.JIRA_EMAIL.lower():
+            return c.get("id"), c.get("author", {}).get("displayName", ""), c.get("created")
+    return None, None, None
+
+
+def process_new_ticket(ticket: dict, project: str):
+    """Full flow for a ticket being seen for the first time."""
     issue_key = ticket["key"]
     fields = ticket.get("fields", {})
     summary = fields.get("summary", "Sin resumen")
     url = jira_client.get_ticket_url(issue_key)
 
-    logger.info(f"Processing new ticket: {issue_key} — {summary}")
+    logger.info(f"NEW ticket: {issue_key} — {summary}")
 
-    # Check SLA
+    # If user already commented on this ticket: just register it silently, no popup, no SLA note.
+    already_responded = jira_client.has_user_commented(issue_key)
+    if already_responded:
+        logger.info(f"{issue_key}: user already commented — marking as seen silently, no alert needed")
+        detail = jira_client.get_ticket_details(issue_key)
+        latest_ts = None
+        if detail:
+            _, _, latest_ts = _get_latest_external_comment(detail)
+        history.mark_seen(issue_key, last_comment_ts=latest_ts)
+        history.record_ticket(
+            issue_key=issue_key, summary=summary, project=project,
+            sla_breached=False, minutes_elapsed=0, responded=True, url=url,
+        )
+        return
+
+    # User has NOT responded yet — full alert flow
     sla_breached, minutes_elapsed = sla_checker.check_sla(ticket)
     if sla_breached:
         logger.warning(f"{issue_key}: SLA vencido — {sla_checker.format_elapsed(minutes_elapsed)}")
 
-    # Show blocking popup — user must acknowledge
-    logger.info(f"Showing popup for {issue_key}")
+    # Blocking popup
     notifier.show_ticket_popup(issue_key, summary, sla_breached, minutes_elapsed)
 
-    # Check if already responded before auto-posting
-    already_responded = jira_client.has_user_commented(issue_key)
-    responded = False
+    # Post greeting
+    greeting = reporter.build_greeting_comment(issue_key, summary)
+    responded = jira_client.post_public_comment(issue_key, greeting)
 
-    if not already_responded:
-        greeting = reporter.build_greeting_comment(issue_key, summary)
-        responded = jira_client.post_public_comment(issue_key, greeting)
-        if responded:
-            logger.info(f"Greeting comment posted on {issue_key}")
-        else:
-            logger.error(f"Failed to post greeting on {issue_key}")
-    else:
-        logger.info(f"{issue_key}: already has a comment from us, skipping greeting")
-        responded = True
-
-    # Post internal SLA note if breached
+    # Internal SLA note only if user hasn't responded yet (checked above)
     if sla_breached:
         note = reporter.build_sla_internal_note(issue_key, minutes_elapsed)
         jira_client.post_internal_note(issue_key, note)
         notifier.show_sla_alert(issue_key, minutes_elapsed)
 
-    # Generate and save report, then open interactive Claude terminal
+    # Generate report and open Claude terminal
     detail = jira_client.get_ticket_details(issue_key)
     report_path = None
     if detail:
         report_path = reporter.generate_report(detail, sla_breached, minutes_elapsed)
-        logger.info(f"Report generated for {issue_key}")
+        _, _, latest_ts = _get_latest_external_comment(detail)
+        history.mark_seen(issue_key, last_comment_ts=latest_ts)
 
-    # Open new Terminal window with Claude Code pre-loaded with ticket context
     if report_path:
         notifier.open_claude_terminal(issue_key, str(report_path), sla_breached, minutes_elapsed)
 
-    # Record in history
     history.record_ticket(
-        issue_key=issue_key,
-        summary=summary,
-        project=project,
-        sla_breached=sla_breached,
-        minutes_elapsed=minutes_elapsed,
-        responded=responded,
-        url=url,
+        issue_key=issue_key, summary=summary, project=project,
+        sla_breached=sla_breached, minutes_elapsed=minutes_elapsed,
+        responded=responded, url=url,
     )
+    logger.info(f"Done processing new ticket {issue_key}")
 
-    # Mark as seen so we don't process it again
-    history.mark_seen(issue_key)
-    logger.info(f"Done processing {issue_key}")
+
+def process_new_comment(issue_key: str, summary: str, author: str, comment_ts: str):
+    """Alert flow when an existing ticket gets a new external comment."""
+    logger.info(f"NEW COMMENT on {issue_key} by {author} at {comment_ts}")
+
+    url = jira_client.get_ticket_url(issue_key)
+
+    # Show popup alerting about the new reply
+    notifier.show_new_comment_popup(issue_key, summary, author)
+
+    # Update tracked comment timestamp
+    history.update_last_comment_ts(issue_key, comment_ts)
+    history.record_comment_alert(issue_key)
+
+    # Generate fresh report and open Claude terminal
+    detail = jira_client.get_ticket_details(issue_key)
+    if detail:
+        _, _, sla_breached, minutes_elapsed = False, 0.0, *sla_checker.check_sla(detail)
+        report_path = reporter.generate_report(detail, sla_breached, minutes_elapsed)
+        notifier.open_claude_terminal(
+            issue_key, str(report_path), sla_breached, minutes_elapsed,
+            context_note=f"Nuevo comentario de {author}. Revisa el historial y decide cómo responder."
+        )
+
+    logger.info(f"Done processing new comment on {issue_key}")
 
 
 def poll_once():
-    seen = history.get_seen_tickets()
-    new_tickets_found = 0
+    new_tickets = 0
+    new_comments = 0
 
     for project in config.JIRA_PROJECTS:
         logger.info(f"Polling {project}...")
-        tickets = jira_client.get_assigned_tickets(project)
-        logger.info(f"{project}: {len(tickets)} ticket(s) assigned")
 
-        for ticket in tickets:
+        # ── 1. Tickets waiting for MY response ───────────────────
+        # Status: "Esperando por ayuda", "En revisión", etc.
+        action_needed = jira_client.get_assigned_tickets(project)
+        logger.info(f"{project}: {len(action_needed)} ticket(s) waiting for my response")
+
+        for ticket in action_needed:
             issue_key = ticket["key"]
-            if issue_key not in seen:
-                new_tickets_found += 1
+            if history.is_new_ticket(issue_key):
+                new_tickets += 1
                 try:
-                    process_ticket(ticket, project)
+                    process_new_ticket(ticket, project)
                 except Exception as e:
-                    logger.error(f"Error processing {issue_key}: {e}", exc_info=True)
+                    logger.error(f"Error processing new ticket {issue_key}: {e}", exc_info=True)
                     history.mark_seen(issue_key)
 
-    if new_tickets_found == 0:
-        logger.info("No new tickets found")
+        # ── 2. Tickets waiting for CLIENT — check if client replied ──
+        # Only alert if a new external comment arrived since last check
+        waiting_client = jira_client.get_waiting_on_client_tickets(project)
+        logger.info(f"{project}: {len(waiting_client)} ticket(s) waiting on client")
+
+        for ticket in waiting_client:
+            issue_key = ticket["key"]
+            summary = ticket.get("fields", {}).get("summary", "")
+
+            # Ensure ticket is registered as seen (silent, no popup)
+            if history.is_new_ticket(issue_key):
+                history.mark_seen(issue_key)
+
+            # Check for new client reply
+            detail = jira_client.get_ticket_details(issue_key)
+            if not detail:
+                continue
+            _, author, latest_ts = _get_latest_external_comment(detail)
+            if not latest_ts:
+                continue
+
+            last_known_ts = history.get_last_comment_ts(issue_key)
+            if last_known_ts is None or latest_ts > last_known_ts:
+                new_comments += 1
+                try:
+                    process_new_comment(issue_key, summary, author or "Desconocido", latest_ts)
+                except Exception as e:
+                    logger.error(f"Error processing new comment on {issue_key}: {e}", exc_info=True)
+                    history.update_last_comment_ts(issue_key, latest_ts)
+
+    if new_tickets == 0 and new_comments == 0:
+        logger.info("No new tickets or comments found")
     else:
-        logger.info(f"Processed {new_tickets_found} new ticket(s)")
+        logger.info(f"Processed: {new_tickets} new ticket(s), {new_comments} new comment(s)")
 
 
 def run_daemon():
@@ -134,7 +208,6 @@ def run_daemon():
     signal.signal(signal.SIGTERM, handle_shutdown)
     signal.signal(signal.SIGINT, handle_shutdown)
 
-    # Initial poll immediately on start
     try:
         poll_once()
     except Exception as e:

@@ -21,6 +21,7 @@ def get_assigned_tickets(project: str) -> list[dict]:
             f"project = {project} "
             f"AND assignee = currentUser() "
             f"AND statusCategory != Done "
+            f"AND status != 10005 "  # 10005 = "Esperando por el cliente"
             f"ORDER BY created DESC"
         ),
         "maxResults": 50,
@@ -37,6 +38,32 @@ def get_assigned_tickets(project: str) -> list[dict]:
         return resp.json().get("issues", [])
     except Exception as e:
         logger.error(f"Error fetching tickets from {project}: {e}")
+        return []
+
+
+def get_waiting_on_client_tickets(project: str) -> list[dict]:
+    """Returns tickets where the user responded and is waiting for the client to reply."""
+    base_url, auth = _get_auth_and_url(project)
+    body = {
+        "jql": (
+            f"project = {project} "
+            f"AND assignee = currentUser() "
+            f"AND statusCategory != Done "
+            f"AND status = 10005 "  # 10005 = "Esperando por el cliente"
+            f"ORDER BY updated DESC"
+        ),
+        "maxResults": 50,
+        "fields": ["summary", "status", "created", "customfield_10020"],
+    }
+    try:
+        resp = requests.post(
+            f"{base_url}/rest/api/3/search/jql",
+            json=body, auth=auth, timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json().get("issues", [])
+    except Exception as e:
+        logger.error(f"Error fetching waiting-on-client tickets from {project}: {e}")
         return []
 
 

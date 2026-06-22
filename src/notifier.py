@@ -46,6 +46,9 @@ def show_ticket_popup(issue_key: str, summary: str, sla_breached: bool, minutes_
         )
         clicked = result.stdout.strip()
         logger.info(f"Popup for {issue_key}: user clicked '{clicked}'")
+        if "Ver en Jira" in clicked:
+            from src.jira_client import get_ticket_url
+            subprocess.Popen(["open", get_ticket_url(issue_key)])
         return True
     except subprocess.TimeoutExpired:
         logger.warning(f"Popup for {issue_key} timed out — treating as acknowledged")
@@ -55,7 +58,35 @@ def show_ticket_popup(issue_key: str, summary: str, sla_breached: bool, minutes_
         return True
 
 
-def open_claude_terminal(issue_key: str, report_path: str, sla_breached: bool, minutes_elapsed: float):
+def show_new_comment_popup(issue_key: str, summary: str, author: str) -> bool:
+    """Blocking popup alerting that an existing ticket received a new reply."""
+    message = (
+        f"💬 Nueva respuesta en ticket\n\n"
+        f"{issue_key}: {summary}\n\n"
+        f"Respondió: {author}\n\n"
+        f"Se abrirá el contexto en Claude al confirmar."
+    )
+    script = f'''
+    set theResult to display dialog {_escape_applescript(message)} ¬
+        with title "MP Incident Manager — Respuesta" ¬
+        buttons {{"Ver en Jira", "Revisar"}} ¬
+        default button "Revisar" ¬
+        with icon note
+    return button returned of theResult
+    '''
+    try:
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=120)
+        clicked = result.stdout.strip()
+        if "Ver en Jira" in clicked:
+            from src.jira_client import get_ticket_url
+            subprocess.Popen(["open", get_ticket_url(issue_key)])
+        return True
+    except Exception as e:
+        logger.error(f"Error showing comment popup for {issue_key}: {e}")
+        return True
+
+
+def open_claude_terminal(issue_key: str, report_path: str, sla_breached: bool, minutes_elapsed: float, context_note: str = ""):
     """
     Opens a new Terminal window with Claude Code pre-loaded with the ticket context.
     The user can analyze and ask questions interactively from there.
@@ -91,16 +122,17 @@ def open_claude_terminal(issue_key: str, report_path: str, sla_breached: bool, m
     except Exception:
         report_content = "Reporte no disponible."
 
+    extra = f"\n\n⚠️ Nota: {context_note}" if context_note else ""
     full_prompt = (
         f"Soy Francisco, IX Engineer en Mercado Libre. "
-        f"Acabo de recibir el ticket {issue_key}{sla_context}\n\n"
-        f"Aquí está el reporte completo del ticket:\n\n"
+        f"Acabo de recibir actividad en el ticket {issue_key}{sla_context}{extra}\n\n"
+        f"Aquí está el reporte completo del ticket incluyendo todo el historial de comentarios:\n\n"
         f"{report_content}\n\n"
         f"Dame:\n"
         f"1. Resumen ejecutivo del problema (2-3 líneas)\n"
-        f"2. Contexto completo de lo que ha pasado (historial de comentarios si hay)\n"
+        f"2. Contexto completo de lo que ha pasado revisando el historial de comentarios\n"
         f"3. Estado del SLA y urgencia\n"
-        f"4. Primeros pasos recomendados para resolver el caso\n\n"
+        f"4. Primeros pasos recomendados para resolver o responder el caso\n\n"
         f"Luego quédate disponible para que te haga preguntas adicionales sobre este ticket."
     )
     prompt_path.write_text(full_prompt, encoding="utf-8")

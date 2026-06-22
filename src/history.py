@@ -24,18 +24,45 @@ def _save_json(path: Path, data: dict):
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
 
 
-def get_seen_tickets() -> set[str]:
-    data = _load_json(SEEN_FILE)
-    return set(data.get("seen", []))
+# ── Seen tickets tracking ──────────────────────────────────────────────────
+
+def get_seen_data() -> dict:
+    """Returns full seen data dict: {key: {last_comment: iso, ...}}"""
+    return _load_json(SEEN_FILE)
 
 
-def mark_seen(issue_key: str):
+def is_new_ticket(issue_key: str) -> bool:
     data = _load_json(SEEN_FILE)
-    seen = set(data.get("seen", []))
-    seen.add(issue_key)
-    data["seen"] = sorted(seen)
+    return issue_key not in data.get("tickets", {})
+
+
+def mark_seen(issue_key: str, last_comment_ts: str | None = None):
+    data = _load_json(SEEN_FILE)
+    tickets = data.get("tickets", {})
+    if issue_key not in tickets:
+        tickets[issue_key] = {}
+    if last_comment_ts:
+        tickets[issue_key]["last_comment_ts"] = last_comment_ts
+    data["tickets"] = tickets
     _save_json(SEEN_FILE, data)
 
+
+def get_last_comment_ts(issue_key: str) -> str | None:
+    data = _load_json(SEEN_FILE)
+    return data.get("tickets", {}).get(issue_key, {}).get("last_comment_ts")
+
+
+def update_last_comment_ts(issue_key: str, ts: str):
+    data = _load_json(SEEN_FILE)
+    tickets = data.get("tickets", {})
+    if issue_key not in tickets:
+        tickets[issue_key] = {}
+    tickets[issue_key]["last_comment_ts"] = ts
+    data["tickets"] = tickets
+    _save_json(SEEN_FILE, data)
+
+
+# ── Ticket history ─────────────────────────────────────────────────────────
 
 def record_ticket(
     issue_key: str,
@@ -60,6 +87,7 @@ def record_ticket(
             "first_response_sent": now_iso if responded else None,
             "sla_breached_on_arrival": sla_breached,
             "elapsed_minutes_on_arrival": round(minutes_elapsed, 1),
+            "new_comment_alerts": 0,
         }
     else:
         if responded and not history[issue_key].get("first_response_sent"):
@@ -68,6 +96,16 @@ def record_ticket(
     data["tickets"] = history
     _save_json(HISTORY_FILE, data)
     logger.info(f"Recorded {issue_key} in history (sla_breached={sla_breached})")
+
+
+def record_comment_alert(issue_key: str):
+    data = _load_json(HISTORY_FILE)
+    history = data.get("tickets", {})
+    if issue_key in history:
+        history[issue_key]["new_comment_alerts"] = history[issue_key].get("new_comment_alerts", 0) + 1
+        history[issue_key]["last_comment_alert"] = datetime.now(timezone.utc).isoformat()
+    data["tickets"] = history
+    _save_json(HISTORY_FILE, data)
 
 
 def get_history() -> list[dict]:
