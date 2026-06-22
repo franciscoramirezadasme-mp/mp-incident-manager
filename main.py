@@ -32,19 +32,31 @@ from src import config
 from src import jira_client, notifier, sla_checker, reporter, history
 
 
+_BOT_KEYWORDS = ["automation for jira", "automation", "servicedesk", "jira automation", "jira@", "noreply"]
+
+
+def _is_bot(email: str, display_name: str) -> bool:
+    combined = (email + display_name).lower()
+    return any(k in combined for k in _BOT_KEYWORDS)
+
+
 def _get_latest_external_comment(ticket: dict) -> tuple[str | None, str | None, str | None]:
     """
     Returns (comment_id, author_display, created_ts) of the most recent comment
-    NOT written by the logged-in user, or (None, None, None) if none exists.
+    NOT written by the logged-in user and NOT from a bot/automation account.
     """
     comments = ticket.get("fields", {}).get("comment", {})
     if not comments:
         return None, None, None
-    all_comments = comments.get("comments", [])
-    for c in reversed(all_comments):
-        author_email = c.get("author", {}).get("emailAddress", "")
-        if author_email.lower() != config.JIRA_EMAIL.lower():
-            return c.get("id"), c.get("author", {}).get("displayName", ""), c.get("created")
+    for c in reversed(comments.get("comments", [])):
+        author = c.get("author", {})
+        email = author.get("emailAddress", "").lower()
+        name = author.get("displayName", "")
+        if email == config.JIRA_EMAIL.lower():
+            continue
+        if _is_bot(email, name):
+            continue
+        return c.get("id"), name, c.get("created")
     return None, None, None
 
 
