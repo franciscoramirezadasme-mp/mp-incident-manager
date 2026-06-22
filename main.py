@@ -67,11 +67,16 @@ def process_ticket(ticket: dict, project: str):
         jira_client.post_internal_note(issue_key, note)
         notifier.show_sla_alert(issue_key, minutes_elapsed)
 
-    # Generate and save report
+    # Generate and save report, then open interactive Claude terminal
     detail = jira_client.get_ticket_details(issue_key)
+    report_path = None
     if detail:
-        report_content = reporter.generate_report(detail, sla_breached, minutes_elapsed)
+        report_path = reporter.generate_report(detail, sla_breached, minutes_elapsed)
         logger.info(f"Report generated for {issue_key}")
+
+    # Open new Terminal window with Claude Code pre-loaded with ticket context
+    if report_path:
+        notifier.open_claude_terminal(issue_key, str(report_path), sla_breached, minutes_elapsed)
 
     # Record in history
     history.record_ticket(

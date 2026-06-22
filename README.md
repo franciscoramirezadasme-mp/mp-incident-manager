@@ -170,16 +170,16 @@ python3 main.py --poll-once
 
 ---
 
-## Análisis IA con Claude
+## Análisis interactivo con Claude Code
 
-Si configuras `ANTHROPIC_API_KEY` en tu `.env`, los reportes incluirán un análisis generado por Claude Haiku con:
+No se necesita API key. El sistema usa directamente **Claude Code CLI** (`~/.local/bin/claude`) que ya tienes instalado.
 
-- Resumen ejecutivo del problema
-- Causa raíz probable
-- Pasos de acción recomendados
-- Nivel de urgencia estimado
+Cuando se detecta un ticket nuevo, después del popup se abre automáticamente una **nueva ventana de Terminal** con:
 
-Obtén tu API key en: https://console.anthropic.com
+1. El reporte completo del ticket impreso en pantalla
+2. Claude Code iniciado con el contexto del ticket como mensaje inicial
+3. Claude ya analiza el ticket y entrega: resumen, contexto histórico, estado SLA y pasos recomendados
+4. La sesión queda abierta para que puedas hacer preguntas adicionales
 
 ---
 

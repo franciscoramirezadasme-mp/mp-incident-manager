@@ -41,7 +41,8 @@ def build_sla_internal_note(issue_key: str, minutes_elapsed: float) -> str:
     )
 
 
-def generate_report(ticket: dict, sla_breached: bool, minutes_elapsed: float) -> str:
+def generate_report(ticket: dict, sla_breached: bool, minutes_elapsed: float) -> Path:
+    """Generates a Markdown report for the ticket and returns the file path."""
     fields = ticket.get("fields", {})
     issue_key = ticket.get("key", "N/A")
     summary = fields.get("summary", "Sin título")
@@ -56,7 +57,6 @@ def generate_report(ticket: dict, sla_breached: bool, minutes_elapsed: float) ->
     description_text = _extract_text(description_blocks)
 
     comments = fields.get("comment", {}).get("comments", []) if fields.get("comment") else []
-    last_comments = comments[-3:] if len(comments) > 3 else comments
 
     from src.jira_client import get_ticket_url
     url = get_ticket_url(issue_key)
@@ -78,19 +78,15 @@ def generate_report(ticket: dict, sla_breached: bool, minutes_elapsed: float) ->
 """
 
     comments_section = ""
-    if last_comments:
-        comments_section = "\n## Últimos comentarios\n\n"
-        for c in last_comments:
+    if comments:
+        comments_section = f"\n## Historial de comentarios ({len(comments)} total)\n\n"
+        for c in comments:
             author = c.get("author", {}).get("displayName", "N/A")
             body = _extract_text(c.get("body", {}))
             created_c = c.get("created", "")[:16].replace("T", " ")
-            comments_section += f"**{author}** ({created_c}):\n> {body[:300]}\n\n"
-
-    if config.ANTHROPIC_API_KEY:
-        ai_analysis = _claude_analysis(issue_key, summary, description_text, last_comments, sla_breached, minutes_elapsed)
-        ai_section = f"\n## Análisis IA (Claude)\n\n{ai_analysis}\n"
-    else:
-        ai_section = ""
+            is_internal = c.get("visibility") is not None
+            tag = " *(interno)*" if is_internal else ""
+            comments_section += f"**{author}** ({created_c}){tag}:\n> {body[:500]}\n\n"
 
     report_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     report = f"""# Reporte de Incidencia — {issue_key}
@@ -117,21 +113,21 @@ def generate_report(ticket: dict, sla_breached: bool, minutes_elapsed: float) ->
 
 {description_text or "_Sin descripción_"}
 
-{comments_section}{ai_section}
+{comments_section}
 ---
 *Generado automáticamente por MP Incident Manager*
 """
 
-    _save_report(issue_key, report)
-    return report
+    return _save_report(issue_key, report)
 
 
-def _save_report(issue_key: str, content: str):
+def _save_report(issue_key: str, content: str) -> Path:
     config.REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = config.REPORTS_DIR / f"{issue_key}_{date_str}.md"
     path.write_text(content, encoding="utf-8")
     logger.info(f"Report saved: {path}")
+    return path
 
 
 def _extract_text(node, depth=0) -> str:
@@ -151,42 +147,3 @@ def _extract_text(node, depth=0) -> str:
     if isinstance(node, list):
         return " ".join(_extract_text(c, depth + 1) for c in node)
     return ""
-
-
-def _claude_analysis(issue_key, summary, description, comments, sla_breached, minutes_elapsed) -> str:
-    try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
-
-        comment_text = ""
-        for c in comments:
-            author = c.get("author", {}).get("displayName", "N/A")
-            body = _extract_text(c.get("body", {}))
-            comment_text += f"- {author}: {body[:200]}\n"
-
-        sla_info = f"SLA vencido ({format_elapsed(minutes_elapsed)})" if sla_breached else f"En tiempo ({format_elapsed(minutes_elapsed)})"
-
-        prompt = f"""Analiza este ticket de soporte de Mercado Pago y proporciona:
-1. Resumen ejecutivo del problema (2-3 oraciones)
-2. Causa raíz probable
-3. Pasos de acción recomendados (máximo 3)
-4. Urgencia estimada (Alta/Media/Baja)
-
-Ticket: {issue_key}
-Resumen: {summary}
-SLA: {sla_info}
-Descripción: {description[:800]}
-Comentarios recientes:
-{comment_text}
-
-Responde en español, de forma concisa y accionable."""
-
-        message = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=600,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return message.content[0].text
-    except Exception as e:
-        logger.warning(f"Claude analysis failed: {e}")
-        return "_Análisis IA no disponible. Configura ANTHROPIC_API_KEY en .env para habilitarlo._"
