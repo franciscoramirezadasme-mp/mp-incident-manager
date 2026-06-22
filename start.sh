@@ -5,32 +5,36 @@ cd "$SCRIPT_DIR"
 PID_FILE="$SCRIPT_DIR/logs/daemon.pid"
 LOG_FILE="$SCRIPT_DIR/logs/incident_manager.log"
 
+mkdir -p logs
+
+# ── Already running? ────────────────────────────────────────
 if [ -f "$PID_FILE" ]; then
     PID=$(cat "$PID_FILE")
     if kill -0 "$PID" 2>/dev/null; then
-        osascript -e 'display dialog "⚠️ MP Incident Manager ya está corriendo." buttons {"OK"} default button "OK" with title "MP Incident Manager"' 2>/dev/null
-        exit 1
+        printf "\033]0;MP Incident Manager — En escucha\007"
+        clear
+        echo ""
+        printf "\033[1;33m⚠️  El daemon ya estaba corriendo (PID $PID)\033[0m\n"
+        echo ""
+        printf "\033[0;32m  Reconectando al log en tiempo real...\033[0m\n"
+        echo ""
+        printf "\033[1;33m── Log ────────────────────────────────────────────────\033[0m\n"
+        exec bash "$SCRIPT_DIR/monitor_status.sh"
+        exit 0
     else
         rm -f "$PID_FILE"
     fi
 fi
 
-mkdir -p logs
-
+# ── Check venv ───────────────────────────────────────────────
 if [ ! -f ".venv/bin/python3" ]; then
-    osascript -e 'display dialog "❌ Entorno no configurado. Ejecuta ./setup.sh primero." buttons {"OK"} default button "OK" with title "MP Incident Manager"' 2>/dev/null
+    echo "❌ Entorno no configurado. Ejecuta ./setup.sh primero."
     exit 1
 fi
 
-# Start daemon in background
+# ── Start daemon ─────────────────────────────────────────────
 nohup .venv/bin/python3 main.py >> "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
 
-# Open a Terminal window showing live status
-osascript << EOF
-tell application "Terminal"
-    activate
-    set w to do script "bash '$SCRIPT_DIR/monitor_status.sh'"
-    set custom title of tab 1 of w to "MP Incident Manager — En escucha"
-end tell
-EOF
+# ── Turn THIS terminal into the live monitor ──────────────────
+exec bash "$SCRIPT_DIR/monitor_status.sh"
