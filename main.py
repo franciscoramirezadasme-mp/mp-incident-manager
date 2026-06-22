@@ -80,9 +80,11 @@ def process_new_ticket(ticket: dict, project: str):
     # Blocking popup
     notifier.show_ticket_popup(issue_key, summary, sla_breached, minutes_elapsed)
 
-    # Post greeting
+    # Post greeting then transition status to "Esperando por el cliente"
     greeting = reporter.build_greeting_comment(issue_key, summary)
     responded = jira_client.post_public_comment(issue_key, greeting)
+    if responded:
+        jira_client.transition_to_waiting_for_client(issue_key)
 
     # Internal SLA note only if user hasn't responded yet (checked above)
     if sla_breached:

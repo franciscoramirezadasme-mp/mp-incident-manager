@@ -184,6 +184,26 @@ def post_internal_note(issue_key: str, text: str) -> bool:
         return False
 
 
+def transition_to_waiting_for_client(issue_key: str) -> bool:
+    """Moves ticket to 'Esperando por el cliente' after agent responds (transition id=141)."""
+    base_url, auth = _get_auth_and_url(issue_key)
+    try:
+        resp = requests.post(
+            f"{base_url}/rest/api/3/issue/{issue_key}/transitions",
+            json={"transition": {"id": "141"}},
+            auth=auth,
+            timeout=15,
+        )
+        if resp.status_code == 204:
+            logger.info(f"{issue_key} transitioned → Esperando por el cliente")
+            return True
+        logger.warning(f"{issue_key} transition failed: {resp.status_code} {resp.text[:100]}")
+        return False
+    except Exception as e:
+        logger.error(f"Error transitioning {issue_key}: {e}")
+        return False
+
+
 def get_ticket_url(issue_key: str) -> str:
     base_url, _ = _get_auth_and_url(issue_key)
     return f"{base_url}/browse/{issue_key}"
