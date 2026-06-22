@@ -72,27 +72,43 @@ def process_new_ticket(ticket: dict, project: str):
         )
         return
 
-    # User has NOT responded yet — full alert flow
+    # User has NOT responded yet — show popup with 3 options
     sla_breached, minutes_elapsed = sla_checker.check_sla(ticket)
     if sla_breached:
         logger.warning(f"{issue_key}: SLA vencido — {sla_checker.format_elapsed(minutes_elapsed)}")
 
-    # Blocking popup
-    notifier.show_ticket_popup(issue_key, summary, sla_breached, minutes_elapsed)
+    clicked = notifier.show_ticket_popup(issue_key, summary, sla_breached, minutes_elapsed)
 
-    # Post greeting then transition status to "Esperando por el cliente"
+    # ── "Ya comenté" — verify and transition ─────────────────────────────
+    if clicked == notifier.POPUP_YA_COMENTE:
+        logger.info(f"{issue_key}: user says already commented — verifying...")
+        if jira_client.has_user_commented(issue_key):
+            jira_client.transition_to_waiting_for_client(issue_key)
+            logger.info(f"{issue_key}: confirmed comment found → transitioned to Esperando por el cliente")
+        else:
+            logger.warning(f"{issue_key}: no comment from user found — keeping as pending")
+        detail = jira_client.get_ticket_details(issue_key)
+        _, _, latest_ts = _get_latest_external_comment(detail) if detail else (None, None, None)
+        history.mark_seen(issue_key, last_comment_ts=latest_ts)
+        history.record_ticket(
+            issue_key=issue_key, summary=summary, project=project,
+            sla_breached=sla_breached, minutes_elapsed=minutes_elapsed,
+            responded=True, url=url,
+        )
+        logger.info(f"Done processing {issue_key} (ya comenté)")
+        return
+
+    # ── "Confirmar" or "Ver en Jira" — full flow ─────────────────────────
     greeting = reporter.build_greeting_comment(issue_key, summary)
     responded = jira_client.post_public_comment(issue_key, greeting)
     if responded:
         jira_client.transition_to_waiting_for_client(issue_key)
 
-    # Internal SLA note only if user hasn't responded yet (checked above)
     if sla_breached:
         note = reporter.build_sla_internal_note(issue_key, minutes_elapsed)
         jira_client.post_internal_note(issue_key, note)
         notifier.show_sla_alert(issue_key, minutes_elapsed)
 
-    # Generate report and open Claude terminal
     detail = jira_client.get_ticket_details(issue_key)
     report_path = None
     if detail:

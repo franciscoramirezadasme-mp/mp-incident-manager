@@ -9,10 +9,15 @@ logger = logging.getLogger(__name__)
 CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
 
 
-def show_ticket_popup(issue_key: str, summary: str, sla_breached: bool, minutes_elapsed: float) -> bool:
+POPUP_CONFIRM  = "Confirmar"
+POPUP_VER_JIRA = "Ver en Jira"
+POPUP_YA_COMENTE = "Ya comenté"
+
+
+def show_ticket_popup(issue_key: str, summary: str, sla_breached: bool, minutes_elapsed: float) -> str:
     """
     Shows a blocking macOS dialog for a new Jira ticket.
-    Returns True if user clicked Aceptar, False if they dismissed or error occurred.
+    Returns the button label clicked: POPUP_CONFIRM | POPUP_VER_JIRA | POPUP_YA_COMENTE.
     """
     sla_warning = ""
     if sla_breached:
@@ -25,37 +30,32 @@ def show_ticket_popup(issue_key: str, summary: str, sla_breached: bool, minutes_
         f"🎫 Nuevo ticket asignado\n\n"
         f"{issue_key}: {summary}"
         f"{sla_warning}\n\n"
-        f"Se abrirá análisis con Claude al confirmar."
+        f"\"Ya comenté\" → verifica si respondiste y cambia el estado."
     )
 
     script = f'''
     set theResult to display dialog {_escape_applescript(message)} ¬
         with title "MP Incident Manager" ¬
-        buttons {{"Ver en Jira", "Aceptar"}} ¬
-        default button "Aceptar" ¬
+        buttons {{"Ver en Jira", "Ya comenté", "Confirmar"}} ¬
+        default button "Confirmar" ¬
         with icon caution
     return button returned of theResult
     '''
 
     try:
-        result = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=120)
         clicked = result.stdout.strip()
         logger.info(f"Popup for {issue_key}: user clicked '{clicked}'")
-        if "Ver en Jira" in clicked:
+        if POPUP_VER_JIRA in clicked:
             from src.jira_client import get_ticket_url
             subprocess.Popen(["open", get_ticket_url(issue_key)])
-        return True
+        return clicked
     except subprocess.TimeoutExpired:
-        logger.warning(f"Popup for {issue_key} timed out — treating as acknowledged")
-        return True
+        logger.warning(f"Popup for {issue_key} timed out — treating as confirmed")
+        return POPUP_CONFIRM
     except Exception as e:
         logger.error(f"Error showing popup for {issue_key}: {e}")
-        return True
+        return POPUP_CONFIRM
 
 
 def show_new_comment_popup(issue_key: str, summary: str, author: str) -> bool:
