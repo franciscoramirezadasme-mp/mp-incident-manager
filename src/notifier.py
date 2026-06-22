@@ -86,6 +86,42 @@ def show_new_comment_popup(issue_key: str, summary: str, author: str) -> bool:
         return True
 
 
+def show_automation_popup(issue_key: str, summary: str, bot_name: str) -> str:
+    """
+    Non-urgent popup for internal Jira automation events.
+    Returns 'suppress' if user wants to silence future automation alerts for this ticket,
+    'ver' to open Jira, or 'ok' to just dismiss.
+    """
+    message = (
+        f"🤖 Evento automático en {issue_key}\n\n"
+        f"{summary[:60]}\n\n"
+        f"Generado por: {bot_name}\n\n"
+        f"\"No mostrar más\" silencia avisos automáticos de este ticket."
+    )
+    script = f'''
+    set theResult to display dialog {_escape_applescript(message)} ¬
+        with title "MP Incident Manager — Evento Interno" ¬
+        buttons {{"Ver en Jira", "No mostrar más", "OK"}} ¬
+        default button "OK" ¬
+        with icon note
+    return button returned of theResult
+    '''
+    try:
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=60)
+        clicked = result.stdout.strip()
+        logger.info(f"Automation popup for {issue_key}: clicked '{clicked}'")
+        if "Ver en Jira" in clicked:
+            from src.jira_client import get_ticket_url
+            subprocess.Popen(["open", get_ticket_url(issue_key)])
+            return "ver"
+        if "No mostrar" in clicked:
+            return "suppress"
+        return "ok"
+    except Exception as e:
+        logger.error(f"Error showing automation popup for {issue_key}: {e}")
+        return "ok"
+
+
 def open_claude_terminal(issue_key: str, report_path: str, sla_breached: bool, minutes_elapsed: float, context_note: str = ""):
     """
     Opens a new Terminal window with Claude Code pre-loaded with the ticket context.

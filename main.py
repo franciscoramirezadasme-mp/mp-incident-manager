@@ -40,6 +40,20 @@ def _is_bot(email: str, display_name: str) -> bool:
     return any(k in combined for k in _BOT_KEYWORDS)
 
 
+def _get_latest_bot_comment(ticket: dict) -> tuple[str | None, str | None, str | None]:
+    """Returns (comment_id, bot_name, created_ts) of the most recent bot/automation comment."""
+    comments = ticket.get("fields", {}).get("comment", {})
+    if not comments:
+        return None, None, None
+    for c in reversed(comments.get("comments", [])):
+        author = c.get("author", {})
+        email = author.get("emailAddress", "").lower()
+        name = author.get("displayName", "")
+        if _is_bot(email, name):
+            return c.get("id"), name, c.get("created")
+    return None, None, None
+
+
 def _get_latest_external_comment(ticket: dict) -> tuple[str | None, str | None, str | None]:
     """
     Returns (comment_id, author_display, created_ts) of the most recent comment
@@ -200,22 +214,33 @@ def poll_once():
             if history.is_new_ticket(issue_key):
                 history.mark_seen(issue_key)
 
-            # Check for new client reply
             detail = jira_client.get_ticket_details(issue_key)
             if not detail:
                 continue
-            _, author, latest_ts = _get_latest_external_comment(detail)
-            if not latest_ts:
-                continue
 
-            last_known_ts = history.get_last_comment_ts(issue_key)
-            if last_known_ts is None or latest_ts > last_known_ts:
-                new_comments += 1
-                try:
-                    process_new_comment(issue_key, summary, author or "Desconocido", latest_ts)
-                except Exception as e:
-                    logger.error(f"Error processing new comment on {issue_key}: {e}", exc_info=True)
-                    history.update_last_comment_ts(issue_key, latest_ts)
+            # ── Check for real client reply ───────────────────────
+            _, author, latest_ts = _get_latest_external_comment(detail)
+            if latest_ts:
+                last_known_ts = history.get_last_comment_ts(issue_key)
+                if last_known_ts is None or latest_ts > last_known_ts:
+                    new_comments += 1
+                    try:
+                        process_new_comment(issue_key, summary, author or "Desconocido", latest_ts)
+                    except Exception as e:
+                        logger.error(f"Error processing new comment on {issue_key}: {e}", exc_info=True)
+                        history.update_last_comment_ts(issue_key, latest_ts)
+
+            # ── Check for automation/internal event ───────────────
+            if not history.is_bot_suppressed(issue_key):
+                _, bot_name, bot_ts = _get_latest_bot_comment(detail)
+                if bot_ts:
+                    last_bot_ts = history.get_last_bot_ts(issue_key)
+                    if last_bot_ts is None or bot_ts > last_bot_ts:
+                        logger.info(f"{issue_key}: new automation event by {bot_name}")
+                        action = notifier.show_automation_popup(issue_key, summary, bot_name or "Automation")
+                        if action == "suppress":
+                            history.suppress_bots(issue_key)
+                        history.update_last_bot_ts(issue_key, bot_ts)
 
     if new_tickets == 0 and new_comments == 0:
         logger.info("No new tickets or comments found")

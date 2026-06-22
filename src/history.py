@@ -62,6 +62,37 @@ def update_last_comment_ts(issue_key: str, ts: str):
     _save_json(SEEN_FILE, data)
 
 
+def get_last_bot_ts(issue_key: str) -> str | None:
+    data = _load_json(SEEN_FILE)
+    return data.get("tickets", {}).get(issue_key, {}).get("last_bot_ts")
+
+
+def update_last_bot_ts(issue_key: str, ts: str):
+    data = _load_json(SEEN_FILE)
+    tickets = data.get("tickets", {})
+    if issue_key not in tickets:
+        tickets[issue_key] = {}
+    tickets[issue_key]["last_bot_ts"] = ts
+    data["tickets"] = tickets
+    _save_json(SEEN_FILE, data)
+
+
+def is_bot_suppressed(issue_key: str) -> bool:
+    data = _load_json(SEEN_FILE)
+    return data.get("tickets", {}).get(issue_key, {}).get("suppress_bots", False)
+
+
+def suppress_bots(issue_key: str):
+    data = _load_json(SEEN_FILE)
+    tickets = data.get("tickets", {})
+    if issue_key not in tickets:
+        tickets[issue_key] = {}
+    tickets[issue_key]["suppress_bots"] = True
+    data["tickets"] = tickets
+    _save_json(SEEN_FILE, data)
+    logger.info(f"{issue_key}: automation notifications suppressed")
+
+
 # ── Ticket history ─────────────────────────────────────────────────────────
 
 def record_ticket(
